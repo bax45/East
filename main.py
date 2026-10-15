@@ -162,63 +162,116 @@ def resolve_rack_with_floor(
     return fallback_code, ""
 
 
-def parse_pdu_csv(file_path: Path):
-    """Parses semicolon-delimited CSV, handles '#' dates, and extracts PDU metrics."""
+
+
+def extract_date_flexible(text: str):
+    """Detects and parses dates in various common formats (DD.MM.YYYY, YYYY-MM-DD,
+
+    DD/MM/YYYY).
+    """
+    patterns = [
+        (r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b", "%d.%m.%Y"),
+        (r"\b(\d{4}-\d{2}-\d{2})\b", "%Y-%m-%d"),
+        (r"\b(\d{1,2}/\d{1,2}/\d{4})\b", "%d/%m/%Y"),
+    ]
+    for pattern, date_fmt in patterns:
+        m = re.search(pattern, text)
+        if m:
+            try:
+                return datetime.strptime(m.group(1), date_fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def parse_pdu_csv(file_path: Path) -> pd.DataFrame:
+    """Parses semicolon-delimited CSV, handles dates, preserves column alignment,
+
+    and extracts PDU metrics dynamically without hardcoded limits.
+    """
     records = []
     file_date = None
 
     with open(file_path, mode="r", encoding="utf-8-sig", errors="ignore") as f:
-        lines = [line.strip() for line in f.readlines() if line.strip()]
+        lines = [line.rstrip("\r\n") for line in f if line.strip()]
+
+    if not lines:
+        return pd.DataFrame()
 
     floor_prefix = detect_floor_prefix(file_path, lines)
 
-    # Extract date (keeps original date object so table constructor formats it)
-    for line in lines[:10]:
-        for cell in line.split(";"):
-            cell = cell.strip()
-            if re.match(r"^\d{2}\.\d{2}\.\d{4}$", cell):
-                try:
-                    file_date = datetime.strptime(cell, "%d.%m.%Y").date()
-                except ValueError:
-                    file_date = cell
-                break
-        if file_date:
+    # 1. Search first 15 lines for a date; fallback to parsing the filename
+    for line in lines[:15]:
+        detected = extract_date_flexible(line)
+        if detected:
+            file_date = detected
             break
 
-    reader = [line.split(";") for line in lines]
-    for i, row in enumerate(reader):
+    if not file_date:
+        file_date = extract_date_flexible(file_path.stem)
+
+    # 2. Parse table rows with strict 1:1 positional indexing
+    grid = [line.split(";") for line in lines]
+
+    for i, row in enumerate(grid):
         row_str = ";".join(row).lower()
-        if "max" in row_str or "average" in row_str:
-            headers = [c.strip() for c in row if c.strip()]
-            if i + 1 < len(reader):
-                val_row = [c.strip() for c in reader[i + 1] if c.strip()]
 
-                for header, val_str in zip(headers, val_row):
-                    m = re.search(
-                        r"^([A-Za-z0-9_-]+)_(PDU[12])_(max|average)$",
-                        header,
-                        re.IGNORECASE,
+        # Target header rows that contain measurement metric keywords
+        if any(
+            k in row_str
+            for k in ["max", "average", "avg", "макс", "средн"]
+        ):
+            if i + 1 >= len(grid):
+                break
+
+            headers = row
+            val_row = grid[i + 1]
+
+            # Preserve exact index positioning
+            min_len = min(len(headers), len(val_row))
+
+            for idx in range(min_len):
+                header = headers[idx].strip()
+                val_str = val_row[idx].strip()
+
+                if not header or not val_str:
+                    continue
+
+                # Matches: RackID + Delimiter + PDU (1, 2, A, B, etc.) + Delimiter + Metric
+                m = re.search(
+                    r"^([A-Za-z0-9_-]+)[_. -]+(PDU[_-]?[0-9A-Za-z]+|[AB])[_. -]+(max|average|avg|макс|средн.*)$",
+                    header,
+                    re.IGNORECASE,
+                )
+
+                if m:
+                    raw_rack = m.group(1)
+                    pdu_raw = m.group(2).upper().replace("_", "").replace("-", "")
+                    metric_raw = m.group(3).lower()
+
+                    # Normalize metric name
+                    if any(x in metric_raw for x in ["avg", "средн"]):
+                        metric = "average"
+                    else:
+                        metric = "max"
+
+                    # Normalize numeric value
+                    try:
+                        clean_num = re.sub(r"[^\d.,-]", "", val_str).replace(",", ".")
+                        val = float(clean_num) if clean_num else None
+                    except ValueError:
+                        val = None
+
+                    records.append(
+                        {
+                            "Raw_Rack": raw_rack,
+                            "Floor_Prefix": floor_prefix,
+                            "Date": file_date,
+                            "PDU": pdu_raw,
+                            "Metric": metric,
+                            "Value": val,
+                        }
                     )
-                    if m:
-                        raw_rack = m.group(1)
-                        pdu_feed = m.group(2).upper()
-                        metric = m.group(3).lower()
-
-                        try:
-                            val = float(val_str.replace(",", "."))
-                        except (ValueError, AttributeError):
-                            val = None
-
-                        records.append(
-                            {
-                                "Raw_Rack": raw_rack,
-                                "Floor_Prefix": floor_prefix,
-                                "Date": file_date,
-                                "PDU": pdu_feed,
-                                "Metric": metric,
-                                "Value": val,
-                            }
-                        )
 
     return pd.DataFrame(records)
 
