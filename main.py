@@ -71,53 +71,95 @@ def load_template_knowledge(ws) -> dict:
     return knowledge
 
 
+
+
 def resolve_rack_with_floor(
     raw_rack: str, floor_prefix: str, template_racks: dict
 ) -> tuple[str, str]:
-    """Resolves raw CSV rack code (e.g., '11A') with floor prefix ('2F_')
+    """Resolves raw CSV rack code (e.g.
 
-    to distinguish '2F_A11' from '3F_A11' based on template knowledge.
+    '11A') with floor prefix ('2F_') to match canonical template racks (e.g.
+    '2F_A11').
     """
-    digits = "".join(re.findall(r"\d+", str(raw_rack)))
-    letters = "".join(re.findall(r"[A-Za-z]+", str(raw_rack))).upper()
+    if not raw_rack:
+        return "", ""
 
+    raw_str = str(raw_rack).strip()
+    digits = "".join(re.findall(r"\d+", raw_str))
+    letters = "".join(re.findall(r"[A-Za-z]+", raw_str)).upper()
+
+    # Normalize floor prefix format (ensure it ends with '_' if present, e.g. '2F_')
+    norm_prefix = str(floor_prefix).strip()
+    if norm_prefix and not norm_prefix.endswith("_"):
+        norm_prefix += "_"
+
+    floor_num = "".join(re.findall(r"\d+", norm_prefix))
+
+    # Candidate variations (e.g. '2F_A11', '2F_11A', '2F_A01')
     candidates = [
-        f"{floor_prefix}{letters}{digits}",
-        f"{floor_prefix}{digits}{letters}",
+        f"{norm_prefix}{letters}{digits}",
+        f"{norm_prefix}{digits}{letters}",
     ]
+    # Handle possible zero-padded variations (e.g. 1 -> 01 or 01 -> 1)
+    if digits:
+        candidates.extend(
+            [
+                f"{norm_prefix}{letters}{digits.zfill(2)}",
+                f"{norm_prefix}{letters}{int(digits)}",
+            ]
+        )
 
+    # 1. Exact match against template
     for cand in candidates:
         for t_rack_no, t_rack_name in template_racks.items():
-            if cand.upper() == t_rack_no.upper():
-                return t_rack_no, t_rack_name
+            if cand.upper() == str(t_rack_no).strip().upper():
+                return t_rack_no, t_rack_name or ""
 
-    floor_num = "".join(re.findall(r"\d+", floor_prefix))
+    # 2. Structural match constrained strictly to the SAME floor
     for t_rack_no, t_rack_name in template_racks.items():
-        if floor_num and not t_rack_no.startswith(f"{floor_num}F"):
+        t_str = str(t_rack_no).strip().upper()
+
+        # Enforce floor constraint
+        if floor_num and not t_str.startswith(f"{floor_num}F"):
             continue
 
-        tail = t_rack_no.split("_")[-1]
+        tail = t_str.split("_")[-1]
         t_digits = "".join(re.findall(r"\d+", tail))
-        t_letters = "".join(re.findall(r"[A-Za-z]+", tail)).upper()
-        if digits == t_digits and letters in t_letters:
-            return t_rack_no, t_rack_name
+        t_letters = "".join(re.findall(r"[A-Za-z]+", tail))
 
+        if letters and letters == t_letters:
+            if digits and (
+                digits == t_digits
+                or int(digits or 0) == int(t_digits or -1)
+            ):
+                return t_rack_no, t_rack_name or ""
+
+    # 3. Constrained fuzzy match (only within the same floor)
     best_match = None
     highest_ratio = 0.0
+
     for t_rack_no, t_rack_name in template_racks.items():
+        t_str = str(t_rack_no).strip().upper()
+
+        # Never fuzzy-match across different floors
+        if floor_num and not t_str.startswith(f"{floor_num}F"):
+            continue
+
         ratio = SequenceMatcher(
-            None, raw_rack.upper(), t_rack_no.upper()
+            None, raw_str.upper(), t_str
         ).ratio()
-        if ratio > highest_ratio and ratio >= 0.6:
+        if ratio > highest_ratio and ratio >= 0.7:
             highest_ratio = ratio
-            best_match = (t_rack_no, t_rack_name)
+            best_match = (t_rack_no, t_rack_name or "")
 
     if best_match:
         return best_match
 
-    default_name = list(template_racks.values())[0] if template_racks else "Selectel"
-    fallback_code = f"{floor_prefix}{letters}{digits}" if floor_prefix else raw_rack
-    return fallback_code, default_name
+    # 4. Safe fallback: do not invent names or steal from other racks
+    fallback_code = (
+        f"{norm_prefix}{letters}{digits}" if norm_prefix else raw_str
+    )
+    return fallback_code, ""
 
 
 def parse_pdu_csv(file_path: Path):
