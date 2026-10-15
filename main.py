@@ -48,15 +48,26 @@ def detect_floor_prefix(file_path: Path, lines: list[str]) -> str:
 
 
 def load_template_knowledge(ws) -> dict:
-    """Reads existing records from template to learn known (Rack_No., Rack_Name) pairs."""
+    """
+    Reads existing records from template to learn known (Rack_No. -> Rack_Name) mappings.
+    Preserves valid names and does not overwrite them with empty records.
+    """
     knowledge = {}
     for r in range(2, ws.max_row + 1):
-        rack_no = ws.cell(row=r, column=1).value
-        rack_name = ws.cell(row=r, column=2).value
-        if rack_no:
-            knowledge[str(rack_no).strip()] = (
-                str(rack_name).strip() if rack_name else "Selectel"
-            )
+        cell_rack_no = ws.cell(row=r, column=1).value
+        cell_rack_name = ws.cell(row=r, column=2).value
+        
+        if cell_rack_no is not None:
+            rack_no_key = str(cell_rack_no).strip()
+            rack_name_val = str(cell_rack_name).strip() if cell_rack_name is not None else ""
+            
+            # If we haven't seen this rack yet, register it
+            if rack_no_key not in knowledge:
+                knowledge[rack_no_key] = rack_name_val
+            # If we find a real name in a later row, update an empty entry
+            elif not knowledge[rack_no_key] and rack_name_val:
+                knowledge[rack_no_key] = rack_name_val
+
     return knowledge
 
 
